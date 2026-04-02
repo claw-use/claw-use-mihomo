@@ -1,3 +1,8 @@
+---
+name: claw-use-mihomo
+description: Manage mihomo proxy - install, configure from subscriptions, monitor health, auto-switch nodes. Supports vmess/ss/trojan/vless protocols.
+---
+
 # claw-use-mihomo
 
 Manage mihomo proxy: install, configure from subscriptions, monitor health, auto-switch nodes.
