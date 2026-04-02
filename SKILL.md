@@ -33,6 +33,7 @@ npx mihomod install
 ```bash
 npx mihomod config "https://example.com/subscribe?token=xxx"
 ```
+Config is validated (YAML parse + structure check) before writing. Old config is backed up to `.bak`.
 
 ### Add single node
 ```bash
@@ -69,11 +70,17 @@ npx mihomod switch "node-name"  # specific node
 ```bash
 npx mihomod watch
 ```
-Monitors endpoints, auto-switches on failure. Outputs JSON events to stdout.
+Monitors endpoints, auto-switches on failure. Outputs JSON events to stdout. Handles SIGTERM/SIGINT gracefully.
 
 ## Config
 Located at `~/.config/mihomod/config.json`. Created automatically on first run.
 Edit to set mihomo API URL, watchdog endpoints, node priorities, etc.
+
+## Safety
+- Config writes are **atomic**: write to `.tmp` → validate YAML + structure → rename (old config backed up to `.bak`)
+- Subscription content is validated before writing — malformed YAML is rejected
+- All network calls have timeouts (API: 5s, subscriptions: 30s, downloads: 120s)
+- Subscription downloads capped at 10MB
 
 ## All output is JSON
 All commands output structured JSON (human-readable on TTY).

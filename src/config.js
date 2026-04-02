@@ -1,5 +1,5 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { homedir } from 'os';
 
 const DEFAULT_CONFIG_DIR = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'mihomod');
@@ -25,21 +25,45 @@ const DEFAULT_CONFIG = {
   selector: '🚀节点选择'
 };
 
+function deepMerge(target, source) {
+  const result = { ...target };
+  for (const key of Object.keys(source)) {
+    if (
+      source[key] !== null &&
+      typeof source[key] === 'object' &&
+      !Array.isArray(source[key]) &&
+      typeof target[key] === 'object' &&
+      !Array.isArray(target[key]) &&
+      target[key] !== null
+    ) {
+      result[key] = deepMerge(target[key], source[key]);
+    } else {
+      result[key] = source[key];
+    }
+  }
+  return result;
+}
+
 export function loadConfig(overridePath) {
   const configPath = overridePath || DEFAULT_CONFIG_FILE;
   if (!existsSync(configPath)) {
-    // Create default config
     mkdirSync(DEFAULT_CONFIG_DIR, { recursive: true });
     writeFileSync(configPath, JSON.stringify(DEFAULT_CONFIG, null, 2));
-    return DEFAULT_CONFIG;
+    return structuredClone(DEFAULT_CONFIG);
   }
   const raw = readFileSync(configPath, 'utf8');
-  return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`Failed to parse config ${configPath}: ${e.message}`);
+  }
+  return deepMerge(DEFAULT_CONFIG, parsed);
 }
 
 export function saveConfig(config, overridePath) {
   const configPath = overridePath || DEFAULT_CONFIG_FILE;
-  mkdirSync(join(configPath, '..'), { recursive: true });
+  mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
 

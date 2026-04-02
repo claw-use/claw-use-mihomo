@@ -1,5 +1,7 @@
 import { log } from './logger.js';
 
+const API_TIMEOUT_MS = 5000;
+
 function apiUrl(config, path) {
   return `${config.mihomo.api}${path}`;
 }
@@ -10,11 +12,18 @@ function headers(config) {
   return h;
 }
 
+function fetchWithTimeout(url, options = {}) {
+  return fetch(url, {
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    ...options,
+  });
+}
+
 export async function status(config) {
   try {
     const [proxyRes, versionRes] = await Promise.all([
-      fetch(apiUrl(config, `/proxies/${encodeURIComponent(config.selector)}`), { headers: headers(config) }),
-      fetch(apiUrl(config, '/version'), { headers: headers(config) })
+      fetchWithTimeout(apiUrl(config, `/proxies/${encodeURIComponent(config.selector)}`), { headers: headers(config) }),
+      fetchWithTimeout(apiUrl(config, '/version'), { headers: headers(config) })
     ]);
 
     if (!proxyRes.ok) throw new Error(`API error: ${proxyRes.status}`);
@@ -22,11 +31,12 @@ export async function status(config) {
     const proxy = await proxyRes.json();
     const version = versionRes.ok ? await versionRes.json() : {};
 
-    const allRes = await fetch(apiUrl(config, '/proxies'), { headers: headers(config) });
+    const allRes = await fetchWithTimeout(apiUrl(config, '/proxies'), { headers: headers(config) });
     const all = await allRes.json();
+    const skipTypes = new Set(['Selector', 'URLTest', 'Fallback', 'Direct', 'Reject', 'Compatible', 'Pass']);
     const proxies = Object.values(all.proxies || {});
-    const alive = proxies.filter(p => p.alive && !['Selector','URLTest','Fallback','Direct','Reject','Compatible','Pass'].includes(p.type)).length;
-    const total = proxies.filter(p => !['Selector','URLTest','Fallback','Direct','Reject','Compatible','Pass'].includes(p.type)).length;
+    const alive = proxies.filter(p => p.alive && !skipTypes.has(p.type)).length;
+    const total = proxies.filter(p => !skipTypes.has(p.type)).length;
 
     const hist = proxy.history || [];
     const delay = hist.length ? hist[hist.length - 1].delay : 0;
@@ -49,10 +59,10 @@ export async function status(config) {
 }
 
 export async function listNodes(config) {
-  const res = await fetch(apiUrl(config, '/proxies'), { headers: headers(config) });
+  const res = await fetchWithTimeout(apiUrl(config, '/proxies'), { headers: headers(config) });
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   const data = await res.json();
-  const skipTypes = new Set(['Selector','URLTest','Fallback','Direct','Reject','Compatible','Pass']);
+  const skipTypes = new Set(['Selector', 'URLTest', 'Fallback', 'Direct', 'Reject', 'Compatible', 'Pass']);
 
   return Object.entries(data.proxies || {})
     .filter(([_, v]) => !skipTypes.has(v.type))
@@ -73,7 +83,6 @@ export async function switchNode(config, nodeName) {
   const from = currentStatus.node;
 
   if (!nodeName) {
-    // Auto-select best
     const nodes = await listNodes(config);
     const priorities = config.watchdog.nodePriority || [];
     const maxDelay = config.watchdog.maxDelay || 3000;
@@ -93,7 +102,7 @@ export async function switchNode(config, nodeName) {
     nodeName = candidates[0].name;
   }
 
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     apiUrl(config, `/proxies/${encodeURIComponent(config.selector)}`),
     {
       method: 'PUT',

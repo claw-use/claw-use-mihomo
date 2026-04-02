@@ -2,6 +2,99 @@
  * Parse various proxy protocol URLs into mihomo proxy format
  */
 
+import { parse as parseYaml } from 'yaml';
+
+const SUBSCRIPTION_TIMEOUT_MS = 30000;
+const MAX_SUBSCRIPTION_BYTES = 10 * 1024 * 1024;
+
+function normalizeBase64(value) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
+  const padding = normalized.length % 4;
+  return padding ? normalized + '='.repeat(4 - padding) : normalized;
+}
+
+function decodeBase64(value) {
+  return Buffer.from(normalizeBase64(value), 'base64').toString('utf8');
+}
+
+function splitAtFirst(value, delimiter) {
+  const index = value.indexOf(delimiter);
+  if (index === -1) return [value, ''];
+  return [value.slice(0, index), value.slice(index + delimiter.length)];
+}
+
+function splitAtLast(value, delimiter) {
+  const index = value.lastIndexOf(delimiter);
+  if (index === -1) return [value, ''];
+  return [value.slice(0, index), value.slice(index + delimiter.length)];
+}
+
+function parseHostPort(value) {
+  if (!value) throw new Error('Invalid SS host: missing server');
+
+  if (value.startsWith('[')) {
+    const closing = value.indexOf(']');
+    const portStart = value.lastIndexOf(':');
+    if (closing === -1 || portStart <= closing) {
+      throw new Error('Invalid SS host: missing port');
+    }
+    return {
+      server: value.slice(1, closing),
+      port: value.slice(portStart + 1)
+    };
+  }
+
+  const portStart = value.lastIndexOf(':');
+  if (portStart === -1) throw new Error('Invalid SS host: missing port');
+
+  return {
+    server: value.slice(0, portStart),
+    port: value.slice(portStart + 1)
+  };
+}
+
+function parseMethodPassword(value) {
+  const separator = value.indexOf(':');
+  if (separator === -1) {
+    throw new Error('Invalid SS credentials');
+  }
+
+  return {
+    method: value.slice(0, separator),
+    password: value.slice(separator + 1)
+  };
+}
+
+async function readResponseText(response, maxBytes) {
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (contentLength > maxBytes) {
+    throw new Error(`Subscription too large: ${contentLength} bytes exceeds ${maxBytes} bytes`);
+  }
+
+  if (!response.body) {
+    return response.text();
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    total += value.byteLength;
+    if (total > maxBytes) {
+      reader.releaseLock();
+      throw new Error(`Subscription too large: exceeds ${maxBytes} bytes`);
+    }
+
+    chunks.push(Buffer.from(value));
+  }
+
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 export function parseProxyUrl(url) {
   if (url.startsWith('vmess://')) return parseVmess(url);
   if (url.startsWith('ss://')) return parseSS(url);
@@ -12,7 +105,7 @@ export function parseProxyUrl(url) {
 
 function parseVmess(url) {
   const b64 = url.replace('vmess://', '');
-  const data = JSON.parse(Buffer.from(b64, 'base64').toString());
+  const data = JSON.parse(decodeBase64(b64));
   return {
     name: data.ps || `vmess-${data.add}`,
     type: 'vmess',
@@ -37,22 +130,32 @@ function parseSS(url) {
   // ss://base64(method:password)@server:port#name
   // or ss://base64(method:password@server:port)#name
   const cleaned = url.replace('ss://', '');
-  const [main, fragment] = cleaned.split('#');
+  const [mainWithQuery, fragment] = splitAtFirst(cleaned, '#');
+  const [main] = splitAtFirst(mainWithQuery, '?');
   const name = fragment ? decodeURIComponent(fragment) : undefined;
 
-  let method, password, server, port;
+  let method;
+  let password;
+  let server;
+  let port;
 
   if (main.includes('@')) {
-    const [userinfo, hostport] = main.split('@');
-    const decoded = Buffer.from(userinfo, 'base64').toString();
-    [method, password] = decoded.split(':');
-    [server, port] = hostport.split(':');
+    const [userinfoEncoded, hostport] = splitAtLast(main, '@');
+    const decodedUserinfo = (() => {
+      try {
+        return decodeBase64(userinfoEncoded);
+      } catch {
+        return decodeURIComponent(userinfoEncoded);
+      }
+    })();
+
+    ({ method, password } = parseMethodPassword(decodedUserinfo));
+    ({ server, port } = parseHostPort(hostport));
   } else {
-    const decoded = Buffer.from(main, 'base64').toString();
-    const match = decoded.match(/^(.+?):(.+?)@(.+?):(\d+)$/);
-    if (match) {
-      [, method, password, server, port] = match;
-    }
+    const decoded = decodeBase64(main);
+    const [userinfo, hostport] = splitAtLast(decoded, '@');
+    ({ method, password } = parseMethodPassword(userinfo));
+    ({ server, port } = parseHostPort(hostport));
   }
 
   return {
@@ -103,27 +206,42 @@ function parseVless(url) {
 }
 
 export async function fetchSubscription(url) {
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(SUBSCRIPTION_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`Subscription fetch failed: ${res.status}`);
-  const text = await res.text();
+  const text = await readResponseText(res, MAX_SUBSCRIPTION_BYTES);
 
   // Try YAML (clash/mihomo format)
-  if (text.includes('proxies:')) {
-    return { format: 'clash', raw: text };
-  }
+  try {
+    const parsed = parseYaml(text);
+    if (parsed && Array.isArray(parsed.proxies) && parsed.proxies.length > 0) {
+      return { format: 'clash', raw: text, config: parsed };
+    }
+  } catch {}
+
+  const trimmed = text.trim();
 
   // Try base64 encoded list
   try {
-    const decoded = Buffer.from(text.trim(), 'base64').toString();
-    const lines = decoded.split('\n').filter(l => l.trim());
-    const proxies = lines.map(l => parseProxyUrl(l.trim())).filter(Boolean);
-    return { format: 'base64', proxies };
+    const decoded = decodeBase64(trimmed);
+    const lines = decoded
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.match(/^(vmess|ss|trojan|vless):\/\//));
+
+    if (lines.length > 0) {
+      const proxies = lines.map(line => parseProxyUrl(line));
+      return { format: 'base64', proxies };
+    }
   } catch {}
 
   // Try line-by-line URLs
-  const lines = text.split('\n').filter(l => l.trim().match(/^(vmess|ss|trojan|vless):\/\//));
+  const lines = text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.match(/^(vmess|ss|trojan|vless):\/\//));
+
   if (lines.length) {
-    const proxies = lines.map(l => parseProxyUrl(l.trim())).filter(Boolean);
+    const proxies = lines.map(line => parseProxyUrl(line));
     return { format: 'urls', proxies };
   }
 

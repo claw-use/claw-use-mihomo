@@ -1,11 +1,9 @@
 #!/usr/bin/env node
-import { resolve } from 'path';
 import { install } from '../src/install.js';
 import { configure, addNode } from '../src/configure.js';
 import { startMihomo, stopMihomo } from '../src/service.js';
-import { status, listNodes } from '../src/api.js';
+import { status, listNodes, switchNode } from '../src/api.js';
 import { watch } from '../src/watchdog.js';
-import { switchNode } from '../src/api.js';
 import { loadConfig } from '../src/config.js';
 import { output, error } from '../src/logger.js';
 

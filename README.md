@@ -10,6 +10,7 @@ Network proxy manager and health watchdog for [mihomo](https://github.com/MetaCu
 - ⚙️ **Configure** from subscription URLs or protocol links (vmess/ss/trojan/vless)
 - 🔍 **Monitor** proxy health with configurable endpoints
 - 🔄 **Auto-switch** to best available node on failure
+- 🛡️ **Safe config writes** — atomic write + YAML validation + backup
 - 🖥️ **Cross-platform** Linux, macOS, Windows
 
 ## Quick Start
@@ -72,6 +73,13 @@ Auto-created at `~/.config/mihomod/config.json`:
   "selector": "🚀节点选择"
 }
 ```
+
+## Safety
+
+- **Atomic config writes**: new config is written to a temp file, validated (YAML parse + structure check), then renamed into place. Old config is always backed up to `.bak`.
+- **All network calls have timeouts**: API 5s, subscriptions 30s, binary downloads 120s.
+- **Subscription size capped** at 10MB.
+- **Graceful shutdown**: watchdog handles SIGTERM/SIGINT cleanly.
 
 ## Agent-Friendly
 
